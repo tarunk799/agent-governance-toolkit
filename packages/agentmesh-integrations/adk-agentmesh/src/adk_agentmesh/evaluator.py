@@ -163,18 +163,22 @@ class ADKPolicyEvaluator:
         )
         return PolicyDecision(verdict=Verdict.ALLOW)
 
-    def before_tool_callback(self, tool_name: str, tool_args: dict, **kwargs) -> Optional[dict]:
+    async def before_tool_callback(
+        self, tool_name: str, tool_args: dict, **kwargs
+    ) -> Optional[dict]:
         """ADK before_tool_callback hook.
 
-        Returns None to allow, or a dict with error to block.
+        Must be ``async def``: ADK invokes all callbacks from within a running
+        asyncio event loop.  A sync callback that calls ``run_until_complete()``
+        raises ``RuntimeError: This event loop is already running``.
+
+        Returns:
+            None to allow the tool call, or a dict with an ``"error"`` key to block.
         """
-        import asyncio
-        decision = asyncio.get_event_loop().run_until_complete(
-            self.evaluate_tool_call(
-                tool_name=tool_name,
-                tool_args=tool_args,
-                agent_name=kwargs.get("agent_name", "unknown"),
-            )
+        decision = await self.evaluate_tool_call(
+            tool_name=tool_name,
+            tool_args=tool_args,
+            agent_name=kwargs.get("agent_name", "unknown"),
         )
         if decision.verdict == Verdict.DENY:
             logger.warning("BLOCKED: %s — %s", tool_name, decision.reason)

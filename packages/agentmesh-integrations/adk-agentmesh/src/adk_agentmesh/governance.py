@@ -63,13 +63,17 @@ class GovernanceCallbacks:
         self.evaluator = evaluator
         self.scope = delegation_scope or DelegationScope()
 
-    def before_tool(self, tool_name: str, tool_args: dict, **kwargs) -> Optional[dict]:
-        """Pre-tool governance check."""
+    async def before_tool(self, tool_name: str, tool_args: dict, **kwargs) -> Optional[dict]:
+        """Pre-tool governance check.
+
+        Must be ``async def``: delegates to ``evaluator.before_tool_callback``
+        which is async to be compatible with ADK's async callback contract.
+        """
         if self.scope.read_only and tool_name.startswith(("write_", "delete_", "update_")):
             return {"error": f"Read-only scope: '{tool_name}' is blocked"}
         if self.scope.allowed_tools and tool_name not in self.scope.allowed_tools:
             return {"error": f"Tool '{tool_name}' not in delegation scope"}
-        return self.evaluator.before_tool_callback(tool_name, tool_args, **kwargs)
+        return await self.evaluator.before_tool_callback(tool_name, tool_args, **kwargs)
 
     def after_tool(self, tool_name: str, result: Any, **kwargs) -> None:
         """Post-tool audit logging."""

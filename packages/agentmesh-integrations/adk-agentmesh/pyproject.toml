@@ -34,3 +34,6 @@ Repository = "https://github.com/microsoft/agent-governance-toolkit"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import textwrap
 from pathlib import Path
 
@@ -18,10 +17,6 @@ from adk_agentmesh.audit import AuditEvent, LoggingAuditHandler
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _run(coro):
-    """Run an async coroutine synchronously."""
-    return asyncio.get_event_loop().run_until_complete(coro)
 
 
 @pytest.fixture()
@@ -306,33 +301,34 @@ class TestDelegationScope:
 class TestGovernanceCallbacks:
     """GovernanceCallbacks wiring into ADK lifecycle."""
 
-    def test_read_only_blocks_write(self):
+    async def test_read_only_blocks_write(self):
         evaluator = ADKPolicyEvaluator()
         scope = DelegationScope(read_only=True)
         callbacks = GovernanceCallbacks(evaluator, delegation_scope=scope)
 
-        result = callbacks.before_tool("write_file", {"path": "/tmp/x"})
+        result = await callbacks.before_tool("write_file", {"path": "/tmp/x"})
         assert result is not None
         assert "read-only" in result["error"].lower() or "Read-only" in result["error"]
 
-    def test_read_only_allows_read(self):
+    async def test_read_only_allows_read(self):
         evaluator = ADKPolicyEvaluator()
         scope = DelegationScope(read_only=True)
         callbacks = GovernanceCallbacks(evaluator, delegation_scope=scope)
 
-        result = callbacks.before_tool("read_file", {"path": "/tmp/x"})
+        result = await callbacks.before_tool("read_file", {"path": "/tmp/x"})
         assert result is None  # allowed
 
-    def test_scope_blocks_unlisted_tool(self):
+    async def test_scope_blocks_unlisted_tool(self):
         evaluator = ADKPolicyEvaluator()
         scope = DelegationScope(allowed_tools=["search_web"])
         callbacks = GovernanceCallbacks(evaluator, delegation_scope=scope)
 
-        result = callbacks.before_tool("execute_shell", {"cmd": "ls"})
+        result = await callbacks.before_tool("execute_shell", {"cmd": "ls"})
         assert result is not None
         assert "not in delegation scope" in result["error"]
 
     def test_max_depth_zero_blocks_delegation(self):
+        """before_agent is sync -- no change needed."""
         evaluator = ADKPolicyEvaluator()
         scope = DelegationScope(max_depth=0)
         callbacks = GovernanceCallbacks(evaluator, delegation_scope=scope)
@@ -430,3 +426,68 @@ class TestDelegationEvaluation:
         )
         log = evaluator.get_audit_log()
         assert any(e["event"] == "delegation_evaluated" for e in log)
+
+
+# ---------------------------------------------------------------------------
+# Regression: before_tool_callback must be async (ADK event loop compat)
+# ---------------------------------------------------------------------------
+
+class TestAsyncCallbacks:
+    """before_tool_callback and GovernanceCallbacks.before_tool must be async.
+
+    ADK invokes all callbacks from within a running asyncio event loop.
+    Sync callbacks that call run_until_complete() raise RuntimeError.
+    """
+
+    async def test_before_tool_callback_callable_from_running_event_loop(self):
+        """before_tool_callback must be awaitable -- no run_until_complete()."""
+        import inspect
+
+        evaluator = ADKPolicyEvaluator(blocked_tools=["execute_shell"])
+
+        assert inspect.iscoroutinefunction(evaluator.before_tool_callback), (
+            "before_tool_callback must be async def -- ADK invokes it from "
+            "inside a running event loop where run_until_complete() raises RuntimeError"
+        )
+
+        result = await evaluator.before_tool_callback(
+            "search_web", {"q": "hello"}, agent_name="test-agent"
+        )
+        assert result is None, "Allowed tool should return None"
+
+    async def test_before_tool_callback_blocks_from_running_event_loop(self):
+        """Blocked tool must be denied even when called from a running event loop."""
+        evaluator = ADKPolicyEvaluator(blocked_tools=["execute_shell"])
+
+        result = await evaluator.before_tool_callback(
+            "execute_shell", {"cmd": "rm -rf /"}, agent_name="bad-agent"
+        )
+        assert result is not None
+        assert "Governance policy violation" in result["error"]
+        assert "blocked" in result["error"].lower()
+
+    async def test_governance_callbacks_before_tool_callable_from_running_event_loop(self):
+        """GovernanceCallbacks.before_tool must also be awaitable."""
+        import inspect
+
+        evaluator = ADKPolicyEvaluator()
+        scope = DelegationScope(allowed_tools=["search_web"])
+        callbacks = GovernanceCallbacks(evaluator, delegation_scope=scope)
+
+        assert inspect.iscoroutinefunction(callbacks.before_tool), (
+            "GovernanceCallbacks.before_tool must be async def -- it calls "
+            "evaluator.before_tool_callback which is now async"
+        )
+
+        result = await callbacks.before_tool("search_web", {"q": "hello"})
+        assert result is None
+
+    async def test_governance_callbacks_before_tool_blocks_from_running_event_loop(self):
+        """GovernanceCallbacks.before_tool blocks disallowed tools from a running loop."""
+        evaluator = ADKPolicyEvaluator()
+        scope = DelegationScope(allowed_tools=["search_web"])
+        callbacks = GovernanceCallbacks(evaluator, delegation_scope=scope)
+
+        result = await callbacks.before_tool("execute_shell", {"cmd": "ls"})
+        assert result is not None
+        assert "not in delegation scope" in result["error"]
